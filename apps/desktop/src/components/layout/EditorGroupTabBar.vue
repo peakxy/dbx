@@ -42,7 +42,6 @@ import {
   Clock3,
   Copy,
   Database,
-  Eraser,
   FoldHorizontal,
   ListFilter,
   ListOrdered,
@@ -1287,6 +1286,12 @@ function saveTabSuffix() {
   applyTabSuffix(tab, suffix);
 }
 
+function clearTabSuffix() {
+  const tab = tabSuffixEditingTab.value;
+  if (tab) applyTabSuffix(tab, "");
+  else tabSuffixEditorOpen.value = false;
+}
+
 function backToTabSuffixEditor() {
   tabSuffixDuplicateOpen.value = false;
   nextTick(() => document.querySelector<HTMLInputElement>("[data-tab-suffix-input]")?.focus());
@@ -1389,12 +1394,6 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       action: () => openTabSuffixEditor(tab),
       icon: Tag,
       visible: canSetTabSuffix(tab),
-    },
-    {
-      label: t("contextMenu.clearTabSuffix"),
-      action: () => queryStore.setTabTitleSuffix(tab.id, ""),
-      icon: Eraser,
-      visible: canSetTabSuffix(tab) && !!tab.titleSuffix,
     },
     {
       label: t("contextMenu.copyName"),
@@ -2197,6 +2196,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
           <p class="break-all rounded-md bg-muted px-2 py-1.5 text-xs" data-tab-suffix-preview>{{ tabSuffixEditorPreview }}</p>
         </div>
         <DialogFooter>
+          <Button v-if="tabSuffixEditingTab?.titleSuffix" variant="outline" data-tab-suffix-clear @click="clearTabSuffix">{{ t("common.clear") }}</Button>
           <Button variant="outline" @click="tabSuffixEditorOpen = false">{{ t("common.cancel") }}</Button>
           <Button data-tab-suffix-save @click="saveTabSuffix">{{ t("common.save") }}</Button>
         </DialogFooter>

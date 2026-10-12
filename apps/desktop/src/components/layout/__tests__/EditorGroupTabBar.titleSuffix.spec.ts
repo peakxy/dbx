@@ -56,9 +56,9 @@ function mountBar(groupId: string, tabIds: string[], activeTabId: string, pinia:
       locale: "en",
       messages: {
         en: {
-          common: { cancel: "Cancel", save: "Save", close: "Close" },
+          common: { cancel: "Cancel", save: "Save", close: "Close", clear: "Clear" },
           connectionGroup: { ungroupedLabel: "Ungrouped" },
-          contextMenu: { setTabSuffix: "Set suffix", clearTabSuffix: "Clear suffix", renameTab: "Rename", duplicateTab: "Duplicate", copyName: "Copy name", closeTab: "Close" },
+          contextMenu: { setTabSuffix: "Set suffix", renameTab: "Rename", duplicateTab: "Duplicate", copyName: "Copy name", closeTab: "Close" },
           sidebar: { locateActiveTab: "Locate" },
           tabs: {
             suffixDialogTitle: "Set tab suffix",
@@ -134,19 +134,18 @@ describe("EditorGroupTabBar tab title suffix", () => {
     return { store, first, second };
   }
 
-  it("offers the suffix action on every non-query tab, and the clear action only once a suffix exists", async () => {
+  it("offers the suffix action on every non-query tab and no separate clear action", async () => {
     const { store, first } = openTwoDataTabs();
     const queryId = store.createTab("pg-1", "app", "Query 1", "query");
     const { app, host } = mountBar(store.groups[0].id, [first, queryId], first, pinia);
     await settle();
 
     expect(menuLabels(host, first)).toContain("Set suffix");
-    expect(menuLabels(host, first)).not.toContain("Clear suffix");
     expect(menuLabels(host, queryId)).not.toContain("Set suffix");
 
     store.setTabTitleSuffix(first, "待办");
     await settle();
-    expect(menuLabels(host, first)).toContain("Clear suffix");
+    expect(menuLabels(host, first)).not.toContain("Clear suffix");
 
     app.unmount();
     host.remove();
@@ -366,9 +365,9 @@ describe("EditorGroupTabBar tab title suffix", () => {
     const { app, host } = mountBar(store.groups[0].id, [first, second], first, pinia);
     await settle();
 
-    menuButtons(host, second)
-      .find((button) => button.textContent === "Clear suffix")!
-      .click();
+    await openSuffixEditor(host, second);
+    expect(byAttr("[data-tab-suffix-clear]")).not.toBeNull();
+    byAttr<HTMLButtonElement>("[data-tab-suffix-clear]")!.click();
     await settle();
 
     expect(store.tabs.find((tab) => tab.id === second)?.titleSuffix).toBeUndefined();

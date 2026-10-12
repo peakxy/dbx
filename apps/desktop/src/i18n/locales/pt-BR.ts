@@ -3684,7 +3684,6 @@ export default withEnglishFallback({
     refreshTab: "Atualizar Dados",
     renameTab: "Renomear Aba",
     setTabSuffix: "Definir sufixo da aba",
-    clearTabSuffix: "Limpar sufixo da aba",
     duplicateTab: "Duplicar Aba",
     splitRight: "Dividir à direita",
     splitDown: "Dividir para baixo",

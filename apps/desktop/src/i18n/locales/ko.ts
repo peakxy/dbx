@@ -3631,7 +3631,6 @@ export default withEnglishFallback({
     refreshTab: "데이터 새로고침",
     renameTab: "탭 이름 변경",
     setTabSuffix: "탭 접미사 설정",
-    clearTabSuffix: "탭 접미사 지우기",
     duplicateTab: "탭 복제",
     splitRight: "오른쪽으로 분할",
     splitDown: "아래로 분할",

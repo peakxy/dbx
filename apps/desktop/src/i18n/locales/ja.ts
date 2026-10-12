@@ -3705,7 +3705,6 @@ export default withEnglishFallback({
     refreshTab: "データを更新",
     renameTab: "タブ名を変更",
     setTabSuffix: "タブのサフィックスを設定",
-    clearTabSuffix: "タブのサフィックスをクリア",
     duplicateTab: "タブを複製",
     splitRight: "右に分割",
     splitDown: "下に分割",

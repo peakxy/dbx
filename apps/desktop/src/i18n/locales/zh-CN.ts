@@ -3872,7 +3872,6 @@ export default withEnglishFallback({
     refreshTab: "刷新数据",
     renameTab: "重命名标签页",
     setTabSuffix: "设置标签后缀",
-    clearTabSuffix: "清除标签后缀",
     duplicateTab: "复制标签页",
     splitRight: "拆分并右移",
     splitDown: "拆分并下移",

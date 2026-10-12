@@ -3839,7 +3839,6 @@ export default withEnglishFallback({
     refreshTab: "Actualizar datos",
     renameTab: "Renombrar pestaña",
     setTabSuffix: "Definir sufijo de pestaña",
-    clearTabSuffix: "Borrar sufijo de pestaña",
     duplicateTab: "Duplicar pestaña",
     splitRight: "Dividir a la derecha",
     splitDown: "Dividir hacia abajo",

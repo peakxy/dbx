@@ -3682,7 +3682,6 @@ export default withEnglishFallback({
     refreshTab: "Aggiorna Dati",
     renameTab: "Rinomina Scheda",
     setTabSuffix: "Imposta suffisso scheda",
-    clearTabSuffix: "Cancella suffisso scheda",
     duplicateTab: "Duplica Scheda",
     splitRight: "Dividi a destra",
     splitDown: "Dividi in basso",

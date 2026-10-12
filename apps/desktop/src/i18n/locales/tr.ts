@@ -3414,7 +3414,6 @@ export default withEnglishFallback({
     refreshTab: "Verileri Yenile",
     renameTab: "Sekmeyi Yeniden Adlandır",
     setTabSuffix: "Sekme Son Ekini Ayarla",
-    clearTabSuffix: "Sekme Son Ekini Temizle",
     duplicateTab: "Sekmeyi Çoğalt",
     splitRight: "Sağa Böl",
     splitDown: "Aşağı Böl",

@@ -3938,7 +3938,6 @@ export default {
     refreshTab: "Refresh Data",
     renameTab: "Rename Tab",
     setTabSuffix: "Set Tab Suffix",
-    clearTabSuffix: "Clear Tab Suffix",
     duplicateTab: "Duplicate Tab",
     splitRight: "Split Right",
     splitDown: "Split Down",

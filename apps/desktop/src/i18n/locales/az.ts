@@ -3443,7 +3443,6 @@ export default withEnglishFallback({
     refreshTab: "Məlumatları yenilə",
     renameTab: "Vərəqin adını dəyiş",
     setTabSuffix: "Vərəq şəkilçisini təyin et",
-    clearTabSuffix: "Vərəq şəkilçisini təmizlə",
     duplicateTab: "Vərəqin surətini yarat",
     splitRight: "Sağa böl",
     splitDown: "Aşağıya böl",

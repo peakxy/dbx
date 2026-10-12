@@ -3737,7 +3737,6 @@ export default withEnglishFallback({
     refreshTab: "Segarkan Data",
     renameTab: "Ganti Nama Tab",
     setTabSuffix: "Atur Akhiran Tab",
-    clearTabSuffix: "Hapus Akhiran Tab",
     duplicateTab: "Duplikat Tab",
     splitRight: "Pisah ke Kanan",
     splitDown: "Pisah ke Bawah",

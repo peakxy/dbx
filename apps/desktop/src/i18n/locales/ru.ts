@@ -3794,7 +3794,6 @@ export default withEnglishFallback({
     refreshTab: "Обновить данные",
     renameTab: "Переименовать вкладку",
     setTabSuffix: "Задать суффикс вкладки",
-    clearTabSuffix: "Удалить суффикс вкладки",
     duplicateTab: "Дублировать вкладку",
     splitRight: "Разделить справа",
     splitDown: "Разделить снизу",

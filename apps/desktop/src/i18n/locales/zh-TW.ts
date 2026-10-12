@@ -3688,7 +3688,6 @@ export default withEnglishFallback({
     refreshTab: "重新整理資料",
     renameTab: "重新命名分頁",
     setTabSuffix: "設定分頁後綴",
-    clearTabSuffix: "清除分頁後綴",
     duplicateTab: "複製分頁",
     splitRight: "拆分並右移",
     splitDown: "拆分並下移",
