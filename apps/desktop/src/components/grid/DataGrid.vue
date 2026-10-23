@@ -415,6 +415,13 @@ import {
   type DataGridToolbarAutoRefreshCapability,
   type DataGridToolbarSaveCapability,
 } from "@/lib/dataGrid/dataGridToolbar";
+import { dataGridDropColumnToolbarState, dataGridDropColumnVisibleIndexes, dataGridSqlTextReferencesColumn, isDataGridViewTable, type DataGridDropColumnCandidate } from "@/lib/dataGrid/dataGridDropColumn";
+import { buildDropTableChildObjectSql } from "@/lib/database/dbAdminSql";
+import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
+import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
+import { isProtectedManticoreIdColumn } from "@/lib/table/tableStructureEditorState";
+import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
@@ -5442,6 +5449,250 @@ const deleteRowToolbarCapability = computed<DataGridToolbarActionCapability>(() 
     deleteCurrentRow();
   },
 }));
+const showDropColumnConfirm = ref(false);
+const dropColumnLoading = ref(false);
+const dropColumnPreviewSql = ref("");
+const pendingDropColumnNames = ref<string[]>([]);
+const pendingDropColumnStatements = ref<string[]>([]);
+let dropColumnRequestId = 0;
+// Replaced once selection state exists. Toolbar computeds read it lazily on render.
+let dropColumnCandidatesNow = (): DataGridDropColumnCandidate[] => [];
+
+function sameOptionalDropScope(left?: string, right?: string): boolean {
+  const normalizedLeft = left?.trim() ?? "";
+  const normalizedRight = right?.trim() ?? "";
+  if (!normalizedLeft || !normalizedRight) return true;
+  return normalizedLeft === normalizedRight;
+}
+
+const dropColumnToolbarState = computed(() =>
+  dataGridDropColumnToolbarState({
+    available: props.context === "table-data" && !!props.tableMeta?.tableName && !!props.connectionId && !!props.database && !isDataGridViewTable(props.tableMeta.tableType) && tableStructureCapabilities.value.dropColumn,
+    busy: props.loading === true || isSaving.value || dropColumnLoading.value,
+    pendingChanges: hasPendingChanges.value,
+    tableColumnCount: props.tableMeta?.columns.length ?? 0,
+    targets: dropColumnCandidatesNow(),
+  }),
+);
+const dropColumnToolbarTooltip = computed(() => {
+  switch (dropColumnToolbarState.value.blockedReason) {
+    case "pending":
+      return t("grid.deleteColumnPendingChanges");
+    case "primary-key":
+      return t("grid.deleteColumnPrimaryKey");
+    case "protected":
+      return t("grid.deleteColumnProtected");
+    case "last-column":
+      return t("grid.deleteColumnLastColumn");
+    case "no-target":
+      return t("grid.deleteColumnSelectColumn");
+    default:
+      return t("grid.deleteColumnTooltip");
+  }
+});
+const deleteColumnToolbarCapability = computed<DataGridToolbarActionCapability>(() => {
+  const count = dropColumnCandidatesNow().length;
+  return {
+    label: count > 1 ? t("grid.deleteColumns", { count }) : t("grid.deleteColumn"),
+    tooltip: dropColumnToolbarTooltip.value,
+    visible: dropColumnToolbarState.value.visible,
+    disabled: dropColumnToolbarState.value.disabled,
+    onTrigger: () => {
+      void requestDropColumns();
+    },
+  };
+});
+const dropColumnConfirmMessage = computed(() => {
+  const table = props.tableMeta?.tableName ?? "";
+  if (pendingDropColumnNames.value.length > 1) {
+    return t("grid.deleteColumnsMessage", {
+      table,
+      count: pendingDropColumnNames.value.length,
+      columns: pendingDropColumnNames.value.join(", "),
+    });
+  }
+  return t("grid.deleteColumnMessage", { table, column: pendingDropColumnNames.value[0] ?? "" });
+});
+
+async function requestDropColumns() {
+  if (dropColumnToolbarState.value.disabled || dropColumnLoading.value || showDropColumnConfirm.value) return;
+  const table = props.tableMeta;
+  if (!table?.tableName || !props.connectionId || !props.database) return;
+  const names = dropColumnCandidatesNow().map((target) => target.name);
+  if (names.length === 0) return;
+  const requestId = ++dropColumnRequestId;
+  pendingDropColumnNames.value = names;
+  pendingDropColumnStatements.value = [];
+  dropColumnPreviewSql.value = "";
+  showDropColumnConfirm.value = true;
+  try {
+    const statements = await Promise.all(
+      names.map((name) =>
+        buildDropTableChildObjectSql({
+          databaseType: resolvedDatabaseType.value,
+          objectType: "COLUMN",
+          schema: table.schema ?? props.schema,
+          tableName: table.tableName,
+          name,
+        }),
+      ),
+    );
+    if (requestId !== dropColumnRequestId || !showDropColumnConfirm.value) return;
+    pendingDropColumnStatements.value = statements.filter((statement) => statement.trim());
+    dropColumnPreviewSql.value = pendingDropColumnStatements.value.join("\n");
+  } catch (error: unknown) {
+    if (requestId !== dropColumnRequestId) return;
+    showDropColumnConfirm.value = false;
+    const message = error instanceof Error ? error.message : String(error);
+    toast(t("grid.deleteColumnFailed", { message }), 5000);
+  }
+}
+
+async function forgetDroppedColumnQueryState(names: string[]): Promise<boolean> {
+  const dropped = new Set(names.map((name) => name.toLowerCase()));
+  let cleared = false;
+  const nextServerFilters = { ...serverColumnFilters.value };
+  for (const [index, filter] of Object.entries(serverColumnFilters.value)) {
+    const columnName = props.result.columns[Number(index)];
+    if (!columnName || !dropped.has(columnName.toLowerCase())) continue;
+    whereFilterInput.value = removeColumnValueFilterCondition(whereFilterInput.value, filter.condition);
+    delete nextServerFilters[Number(index)];
+    cleared = true;
+  }
+  if (cleared) serverColumnFilters.value = nextServerFilters;
+  if (names.some((name) => dataGridSqlTextReferencesColumn(whereFilterInput.value, name))) {
+    whereFilterInput.value = "";
+    cleared = true;
+  }
+  const remainingRules = structuredFilterRules.value.filter((rule) => !rule.columnName || !dropped.has(rule.columnName.toLowerCase()));
+  if (remainingRules.length !== structuredFilterRules.value.length) {
+    structuredFilterRules.value = remainingRules.length > 0 ? remainingRules : [defaultStructuredFilterRule()];
+    try {
+      appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(structuredFilterRules.value);
+    } catch {
+      appliedStructuredWhereInput.value = "";
+    }
+    cleared = true;
+  }
+  if (sortCol.value && dropped.has(sortCol.value.toLowerCase())) {
+    clearSort();
+    syncOrderByInputWithSort(null, null);
+    cleared = true;
+  } else if (names.some((name) => dataGridSqlTextReferencesColumn(orderByInput.value, name))) {
+    orderByInput.value = "";
+    cleared = true;
+  }
+  const droppedIndexes = new Set<number>();
+  props.result.columns.forEach((columnName, index) => {
+    if (columnName && dropped.has(columnName.toLowerCase())) droppedIndexes.add(index);
+  });
+  if ([...droppedIndexes].some((index) => localColumnFilters.value[index])) {
+    const nextLocalFilters: Record<number, Set<string>> = {};
+    for (const [index, values] of Object.entries(localColumnFilters.value)) {
+      if (!droppedIndexes.has(Number(index))) nextLocalFilters[Number(index)] = values;
+    }
+    localColumnFilters.value = nextLocalFilters;
+    cleared = true;
+  }
+  return cleared;
+}
+
+function patchOpenDataTabsAfterColumnDrop(names: string[]) {
+  const table = props.tableMeta;
+  if (!table?.tableName || !props.connectionId) return;
+  const database = table.database || props.database || "";
+  const dropped = new Set(names.map((name) => name.toLowerCase()));
+  const keep = (name: string) => !dropped.has(name.toLowerCase());
+  for (const tab of queryStore.tabs) {
+    const meta = tab.tableMeta;
+    if (tab.mode !== "data" || tab.connectionId !== props.connectionId || !meta || meta.tableName !== table.tableName) continue;
+    const tabDatabase = meta.database || tab.database;
+    if (tabDatabase !== database && tab.database !== database) continue;
+    if (!sameOptionalDropScope(meta.schema || tab.schema, table.schema || props.schema) || !sameOptionalDropScope(meta.catalog, table.catalog)) continue;
+    queryStore.setTableMeta(tab.id, {
+      ...meta,
+      columns: meta.columns.filter((column) => keep(column.name)),
+      primaryKeys: meta.primaryKeys.filter(keep),
+      ...(meta.virtualPrimaryKeys ? { virtualPrimaryKeys: meta.virtualPrimaryKeys.filter(keep) } : {}),
+    });
+    if (tab.id !== props.cacheKey && tab.id !== queryStore.activeTabId) void queryStore.refreshDataTab(tab.id);
+  }
+}
+
+async function publishColumnDrop(names: string[]) {
+  const table = props.tableMeta;
+  if (!table?.tableName || !props.connectionId) return;
+  const database = table.database || props.database || "";
+  invalidateTableMetadataCache({ connectionId: props.connectionId, database, tableName: table.tableName });
+  const metadataMatch = { connectionId: props.connectionId, database, schema: table.schema ?? props.schema, tableName: table.tableName, catalog: table.catalog };
+  void invalidateObjectMetadataCache(metadataMatch).catch((error: unknown) => {
+    console.warn("[DBX][drop-column:metadata]", error);
+  });
+  connectionStore.invalidateCompletionTableCache(props.connectionId, database, table.tableName, table.schema ?? props.schema, table.catalog);
+  queryStore.invalidateTableStructure(props.connectionId, database, table.schema ?? props.schema, table.tableName);
+  patchOpenDataTabsAfterColumnDrop(names);
+  const groups: typeof connectionStore.treeNodes = [];
+  const visit = (nodes: typeof connectionStore.treeNodes | undefined) => {
+    if (!nodes) return;
+    for (const node of nodes) {
+      if (node.type === "group-columns" && node.connectionId === props.connectionId && node.tableName === table.tableName && (node.database || "") === database && sameOptionalDropScope(node.schema, table.schema || props.schema) && sameOptionalDropScope(node.catalog, table.catalog)) {
+        groups.push(node);
+      }
+      visit(node.children);
+      visit(node.hiddenChildren);
+    }
+  };
+  visit(connectionStore.treeNodes);
+  for (const group of groups) {
+    try {
+      await connectionStore.refreshTreeNode(group);
+    } catch (error: unknown) {
+      console.warn("[DBX][drop-column:sidebar-refresh]", error);
+    }
+  }
+  await reloadTableData("refresh");
+}
+
+async function confirmDropColumns() {
+  if (dropColumnLoading.value) return;
+  const names = pendingDropColumnNames.value.slice();
+  const statements = pendingDropColumnStatements.value.slice();
+  const table = props.tableMeta;
+  const connectionId = props.connectionId;
+  const database = table?.database || props.database;
+  if (!table?.tableName || !connectionId || !database || statements.length === 0) return;
+  dropColumnLoading.value = true;
+  const sql = statements.join("\n");
+  let started = false;
+  try {
+    const connection = connectionStore.getConfig(connectionId);
+    const result = await executeWithProductionSqlGuard({
+      connection,
+      database,
+      sql,
+      source: t("production.sourceDataGrid"),
+      execute: () => {
+        started = true;
+        return api.executeBatch(connectionId, database, statements, table.schema ?? props.schema, queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs), false);
+      },
+    });
+    if (!started || result === undefined) return;
+    showDropColumnConfirm.value = false;
+    const cleared = await forgetDroppedColumnQueryState(names);
+    await publishColumnDrop(names);
+    toast(names.length > 1 ? t("grid.deleteColumnsSuccess", { count: names.length }) : t("grid.deleteColumnSuccess", { column: names[0] ?? "" }), 4000);
+    if (cleared) toast(t("grid.deleteColumnFilterCleared"), 4000);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    toast(t("grid.deleteColumnFailed", { message }), 5000);
+    if (started) {
+      showDropColumnConfirm.value = false;
+      await publishColumnDrop(names);
+    }
+  } finally {
+    dropColumnLoading.value = false;
+  }
+}
 const previewToolbarCapability = computed<DataGridToolbarActionCapability>(() => ({
   label: t(previewLabelKey.value),
   visible: saveToolbarState.value.showActions && pendingChangeCount.value > 0,
@@ -6084,6 +6335,25 @@ const {
   handleDataCellMousedown,
   isRowSelected,
 } = selection;
+
+dropColumnCandidatesNow = () => {
+  const selected = hasColumnSelection.value ? [...selectedColumnIndexes.value].filter((index) => index >= 0 && index < visibleColumnIndexes.value.length) : [];
+  const seen = new Set<string>();
+  const targets: DataGridDropColumnCandidate[] = [];
+  // A row selection is about rows. Don't treat its leftover cell focus as a column to drop.
+  const focusVisibleIndex = hasColumnSelection.value || hasRowSelection.value ? undefined : selectionFocus.value?.colIndex;
+  for (const visibleIndex of dataGridDropColumnVisibleIndexes(selected, focusVisibleIndex)) {
+    const column = tableColumnForGridColumn(actualColumnIndex(visibleIndex));
+    if (!column?.name || seen.has(column.name)) continue;
+    seen.add(column.name);
+    targets.push({
+      name: column.name,
+      primaryKey: column.is_primary_key,
+      protectedColumn: isProtectedManticoreIdColumn(resolvedDatabaseType.value, column.name),
+    });
+  }
+  return targets;
+};
 
 // 行列十字高亮目标：以 selectionFocus（原始坐标系）为中心解析，整行/整列选中时从
 // lastClickedRowIndex / selectedRowIds / selectedColumnIndexes 派生。开关关闭时恒为 null。
@@ -14722,6 +14992,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
             :delete-row="deleteRowToolbarCapability"
+            :delete-column="deleteColumnToolbarCapability"
             :layer-preview="layerPreviewToolbarCapability"
             :preview="previewToolbarCapability"
             :save="saveToolbarCapability"
@@ -16975,6 +17246,17 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
     <div v-if="isConditionalUpdateActive" class="absolute inset-0 z-50 flex items-center justify-center bg-background/75 backdrop-blur-[1px]">
       <QueryLoadingState class="p-6" :show-cancel="true" :cancelling="conditionalUpdateExecution?.cancelling" @cancel="cancelRunningConditionalBulkEdit" />
     </div>
+    <DangerConfirmDialog
+      v-model:open="showDropColumnConfirm"
+      :title="pendingDropColumnNames.length > 1 ? t('grid.deleteColumns', { count: pendingDropColumnNames.length }) : t('grid.deleteColumn')"
+      :message="dropColumnConfirmMessage"
+      :sql="dropColumnPreviewSql"
+      :confirm-label="pendingDropColumnNames.length > 1 ? t('grid.deleteColumns', { count: pendingDropColumnNames.length }) : t('grid.deleteColumn')"
+      :confirm-disabled="pendingDropColumnStatements.length === 0"
+      :loading="dropColumnLoading"
+      :close-on-confirm="false"
+      @confirm="confirmDropColumns"
+    />
     <DangerConfirmDialog
       v-model:open="showDeleteRowConfirm"
       :message="
