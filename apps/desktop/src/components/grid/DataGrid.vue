@@ -5454,7 +5454,51 @@ const dropColumnLoading = ref(false);
 const dropColumnPreviewSql = ref("");
 const pendingDropColumnNames = ref<string[]>([]);
 const pendingDropColumnStatements = ref<string[]>([]);
+interface DropColumnTarget {
+  connectionId: string;
+  database: string;
+  schema: string;
+  catalog: string;
+  tableName: string;
+  /** Schema argument for getColumns, which falls back to the database for non-schema-aware engines. */
+  columnsSchema: string;
+}
+// Snapshot of the table the confirm dialog was opened for; the props may move on before confirm.
+const pendingDropColumnTarget = ref<DropColumnTarget | null>(null);
 let dropColumnRequestId = 0;
+
+function currentDropColumnTarget(): DropColumnTarget | null {
+  const table = props.tableMeta;
+  const database = table?.database || props.database;
+  if (!table?.tableName || !props.connectionId || !database) return null;
+  const schema = table.schema ?? props.schema ?? "";
+  return {
+    connectionId: props.connectionId,
+    database,
+    schema,
+    catalog: table.catalog ?? "",
+    tableName: table.tableName,
+    columnsSchema: schema || (isSchemaAware(resolvedDatabaseType.value) ? "" : database),
+  };
+}
+
+function sameDropColumnTarget(left: DropColumnTarget | null, right: DropColumnTarget | null): boolean {
+  return !!left && !!right && left.connectionId === right.connectionId && left.database === right.database && left.schema === right.schema && left.catalog === right.catalog && left.tableName === right.tableName;
+}
+
+// Table or connection changed under an open confirm: drop it so the user reselects.
+watch(
+  () => {
+    const target = currentDropColumnTarget();
+    return target ? [target.connectionId, target.database, target.schema, target.catalog, target.tableName].join("\u0000") : "";
+  },
+  () => {
+    if (!showDropColumnConfirm.value || dropColumnLoading.value) return;
+    if (sameDropColumnTarget(pendingDropColumnTarget.value, currentDropColumnTarget())) return;
+    dropColumnRequestId++;
+    showDropColumnConfirm.value = false;
+  },
+);
 // Replaced once selection state exists. Toolbar computeds read it lazily on render.
 let dropColumnCandidatesNow = (): DataGridDropColumnCandidate[] => [];
 
@@ -5503,7 +5547,7 @@ const deleteColumnToolbarCapability = computed<DataGridToolbarActionCapability>(
   };
 });
 const dropColumnConfirmMessage = computed(() => {
-  const table = props.tableMeta?.tableName ?? "";
+  const table = pendingDropColumnTarget.value?.tableName ?? "";
   if (pendingDropColumnNames.value.length > 1) {
     return t("grid.deleteColumnsMessage", {
       table,
@@ -5516,11 +5560,12 @@ const dropColumnConfirmMessage = computed(() => {
 
 async function requestDropColumns() {
   if (dropColumnToolbarState.value.disabled || dropColumnLoading.value || showDropColumnConfirm.value) return;
-  const table = props.tableMeta;
-  if (!table?.tableName || !props.connectionId || !props.database) return;
-  const names = dropColumnCandidatesNow().map((target) => target.name);
+  const target = currentDropColumnTarget();
+  if (!target || !props.database) return;
+  const names = dropColumnCandidatesNow().map((candidate) => candidate.name);
   if (names.length === 0) return;
   const requestId = ++dropColumnRequestId;
+  pendingDropColumnTarget.value = target;
   pendingDropColumnNames.value = names;
   pendingDropColumnStatements.value = [];
   dropColumnPreviewSql.value = "";
@@ -5531,8 +5576,8 @@ async function requestDropColumns() {
         buildDropTableChildObjectSql({
           databaseType: resolvedDatabaseType.value,
           objectType: "COLUMN",
-          schema: table.schema ?? props.schema,
-          tableName: table.tableName,
+          schema: target.schema || undefined,
+          tableName: target.tableName,
           name,
         }),
       ),
@@ -5597,18 +5642,15 @@ async function forgetDroppedColumnQueryState(names: string[]): Promise<boolean> 
   return cleared;
 }
 
-function patchOpenDataTabsAfterColumnDrop(names: string[]) {
-  const table = props.tableMeta;
-  if (!table?.tableName || !props.connectionId) return;
-  const database = table.database || props.database || "";
+function patchOpenDataTabsAfterColumnDrop(target: DropColumnTarget, names: string[]) {
   const dropped = new Set(names.map((name) => name.toLowerCase()));
   const keep = (name: string) => !dropped.has(name.toLowerCase());
   for (const tab of queryStore.tabs) {
     const meta = tab.tableMeta;
-    if (tab.mode !== "data" || tab.connectionId !== props.connectionId || !meta || meta.tableName !== table.tableName) continue;
+    if (tab.mode !== "data" || tab.connectionId !== target.connectionId || !meta || meta.tableName !== target.tableName) continue;
     const tabDatabase = meta.database || tab.database;
-    if (tabDatabase !== database && tab.database !== database) continue;
-    if (!sameOptionalDropScope(meta.schema || tab.schema, table.schema || props.schema) || !sameOptionalDropScope(meta.catalog, table.catalog)) continue;
+    if (tabDatabase !== target.database && tab.database !== target.database) continue;
+    if (!sameOptionalDropScope(meta.schema || tab.schema, target.schema) || !sameOptionalDropScope(meta.catalog, target.catalog)) continue;
     queryStore.setTableMeta(tab.id, {
       ...meta,
       columns: meta.columns.filter((column) => keep(column.name)),
@@ -5619,23 +5661,37 @@ function patchOpenDataTabsAfterColumnDrop(names: string[]) {
   }
 }
 
-async function publishColumnDrop(names: string[]) {
-  const table = props.tableMeta;
-  if (!table?.tableName || !props.connectionId) return;
-  const database = table.database || props.database || "";
-  invalidateTableMetadataCache({ connectionId: props.connectionId, database, tableName: table.tableName });
-  const metadataMatch = { connectionId: props.connectionId, database, schema: table.schema ?? props.schema, tableName: table.tableName, catalog: table.catalog };
+/**
+ * Refreshes caches, tabs, sidebar and the grid after a drop attempt, trusting the
+ * server's column list over the attempt: `executeBatch` runs one ALTER per column, so a
+ * failure part-way leaves some columns dropped. `fallback` is used when the list can't be read.
+ */
+async function publishColumnDrop(target: DropColumnTarget, attempted: string[], fallback: string[]): Promise<{ dropped: string[]; cleared: boolean }> {
+  const { connectionId, database, tableName } = target;
+  const schema = target.schema || undefined;
+  const catalog = target.catalog || undefined;
+  invalidateTableMetadataCache({ connectionId, database, tableName });
+  const metadataMatch = { connectionId, database, schema, tableName, catalog };
   void invalidateObjectMetadataCache(metadataMatch).catch((error: unknown) => {
     console.warn("[DBX][drop-column:metadata]", error);
   });
-  connectionStore.invalidateCompletionTableCache(props.connectionId, database, table.tableName, table.schema ?? props.schema, table.catalog);
-  queryStore.invalidateTableStructure(props.connectionId, database, table.schema ?? props.schema, table.tableName);
-  patchOpenDataTabsAfterColumnDrop(names);
+  connectionStore.invalidateCompletionTableCache(connectionId, database, tableName, schema, catalog);
+  queryStore.invalidateTableStructure(connectionId, database, schema, tableName);
+  let dropped = fallback;
+  try {
+    const remaining = new Set((await api.getColumns(connectionId, database, target.columnsSchema, tableName, catalog)).map((column) => column.name.toLowerCase()));
+    dropped = attempted.filter((name) => !remaining.has(name.toLowerCase()));
+  } catch (error: unknown) {
+    console.warn("[DBX][drop-column:verify]", error);
+  }
+  const stillCurrent = sameDropColumnTarget(target, currentDropColumnTarget());
+  const cleared = stillCurrent && dropped.length > 0 ? await forgetDroppedColumnQueryState(dropped) : false;
+  patchOpenDataTabsAfterColumnDrop(target, dropped);
   const groups: typeof connectionStore.treeNodes = [];
   const visit = (nodes: typeof connectionStore.treeNodes | undefined) => {
     if (!nodes) return;
     for (const node of nodes) {
-      if (node.type === "group-columns" && node.connectionId === props.connectionId && node.tableName === table.tableName && (node.database || "") === database && sameOptionalDropScope(node.schema, table.schema || props.schema) && sameOptionalDropScope(node.catalog, table.catalog)) {
+      if (node.type === "group-columns" && node.connectionId === connectionId && node.tableName === tableName && (node.database || "") === database && sameOptionalDropScope(node.schema, target.schema) && sameOptionalDropScope(node.catalog, target.catalog)) {
         groups.push(node);
       }
       visit(node.children);
@@ -5650,44 +5706,53 @@ async function publishColumnDrop(names: string[]) {
       console.warn("[DBX][drop-column:sidebar-refresh]", error);
     }
   }
-  await reloadTableData("refresh");
+  if (stillCurrent) await reloadTableData("refresh");
+  return { dropped, cleared };
+}
+
+function toastColumnsDropped(names: string[]) {
+  if (names.length === 0) return;
+  toast(names.length > 1 ? t("grid.deleteColumnsSuccess", { count: names.length }) : t("grid.deleteColumnSuccess", { column: names[0] ?? "" }), 4000);
 }
 
 async function confirmDropColumns() {
   if (dropColumnLoading.value) return;
+  const target = pendingDropColumnTarget.value;
   const names = pendingDropColumnNames.value.slice();
   const statements = pendingDropColumnStatements.value.slice();
-  const table = props.tableMeta;
-  const connectionId = props.connectionId;
-  const database = table?.database || props.database;
-  if (!table?.tableName || !connectionId || !database || statements.length === 0) return;
+  if (!target || statements.length === 0) return;
+  if (!sameDropColumnTarget(target, currentDropColumnTarget())) {
+    showDropColumnConfirm.value = false;
+    return;
+  }
   dropColumnLoading.value = true;
   const sql = statements.join("\n");
   let started = false;
   try {
-    const connection = connectionStore.getConfig(connectionId);
+    const connection = connectionStore.getConfig(target.connectionId);
     const result = await executeWithProductionSqlGuard({
       connection,
-      database,
+      database: target.database,
       sql,
       source: t("production.sourceDataGrid"),
       execute: () => {
         started = true;
-        return api.executeBatch(connectionId, database, statements, table.schema ?? props.schema, queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs), false);
+        return api.executeBatch(target.connectionId, target.database, statements, target.schema || undefined, queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs), false);
       },
     });
     if (!started || result === undefined) return;
     showDropColumnConfirm.value = false;
-    const cleared = await forgetDroppedColumnQueryState(names);
-    await publishColumnDrop(names);
-    toast(names.length > 1 ? t("grid.deleteColumnsSuccess", { count: names.length }) : t("grid.deleteColumnSuccess", { column: names[0] ?? "" }), 4000);
+    const { dropped, cleared } = await publishColumnDrop(target, names, names);
+    toastColumnsDropped(dropped);
     if (cleared) toast(t("grid.deleteColumnFilterCleared"), 4000);
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     toast(t("grid.deleteColumnFailed", { message }), 5000);
     if (started) {
       showDropColumnConfirm.value = false;
-      await publishColumnDrop(names);
+      // Earlier columns may already be gone; if the list can't be read, assume none.
+      const { dropped } = await publishColumnDrop(target, names, []);
+      toastColumnsDropped(dropped);
     }
   } finally {
     dropColumnLoading.value = false;
