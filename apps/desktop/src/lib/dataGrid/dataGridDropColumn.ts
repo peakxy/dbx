@@ -70,6 +70,11 @@ export function dataGridSqlTextReferencesColumn(sql: string | undefined, column:
   return new RegExp(`${quoted}|${bare}`, caseSensitive ? "" : "i").test(text);
 }
 
+/** True when a query fragment references any of the columns being dropped. */
+export function dataGridSqlTextReferencesAnyColumn(sql: string | undefined, columns: readonly string[], caseSensitive = false): boolean {
+  return columns.some((column) => dataGridSqlTextReferencesColumn(sql, column, caseSensitive));
+}
+
 export interface DataGridDropTarget {
   connectionId: string;
   database: string;

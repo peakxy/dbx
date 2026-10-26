@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { dataGridDroppedColumnNames, dataGridDropColumnToolbarState, dataGridDropColumnVisibleIndexes, dataGridDropTabsHavePending, dataGridDropTargetTabs, dataGridSqlTextReferencesColumn, isDataGridColumnNameCaseSensitive, isDataGridViewTable } from "@/lib/dataGrid/dataGridDropColumn";
+import { clearDataGridStructuredFilterStates, loadDataGridStructuredFilterState, removeDataGridStructuredFilterColumnsForTab, saveDataGridStructuredFilterState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import {
+  dataGridDroppedColumnNames,
+  dataGridDropColumnToolbarState,
+  dataGridDropColumnVisibleIndexes,
+  dataGridDropTabsHavePending,
+  dataGridDropTargetTabs,
+  dataGridSqlTextReferencesAnyColumn,
+  dataGridSqlTextReferencesColumn,
+  isDataGridColumnNameCaseSensitive,
+  isDataGridViewTable,
+} from "@/lib/dataGrid/dataGridDropColumn";
 
 const status = { name: "status", primaryKey: false, protectedColumn: false };
 
@@ -73,5 +84,41 @@ describe("data grid drop column", () => {
     expect(dataGridDropTabsHavePending(same)).toBe(true);
     expect(dataGridDropTabsHavePending([same[0]!])).toBe(false);
     expect(dataGridDropTabsHavePending([same[2]!])).toBe(true);
+  });
+
+  it("detects dropped columns in another tab's query inputs before refresh", () => {
+    expect(dataGridSqlTextReferencesAnyColumn('status = 1 AND "archived" = 0', ["status", "archived"])).toBe(true);
+    expect(dataGridSqlTextReferencesAnyColumn("status_code = 1", ["status"])).toBe(false);
+  });
+
+  it("removes dropped columns from cached structured filters", async () => {
+    clearDataGridStructuredFilterStates();
+    saveDataGridStructuredFilterState("tab-1", {
+      scopeKey: "scope\u0001id\0status\0name",
+      manualWhereInput: "status = 1",
+      rules: [{ id: "r1", columnName: "status", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" }],
+      appliedWhereInput: "status = 1",
+      serverColumnFilters: { 1: { condition: "status = 1", keys: ["1"], labels: ["1"] } },
+    });
+    await removeDataGridStructuredFilterColumnsForTab("tab-1", ["id", "status", "name"], ["status"], false, async () => "");
+    expect(loadDataGridStructuredFilterState("tab-1", "scope\u0001id\0name")).toMatchObject({ manualWhereInput: "", rules: [], appliedWhereInput: "", serverColumnFilters: {} });
+  });
+
+  it("preserves remaining rules and remaps server filters after a partial drop", async () => {
+    clearDataGridStructuredFilterStates();
+    const state = {
+      scopeKey: "connection\u0001db\u0001\u0001table-data\u0001\u0001t\u0001id\0status\0score",
+      manualWhereInput: "id > 0",
+      rules: ["status", "score"].map((columnName) => ({ id: columnName, columnName, mode: "equals" as const, rawValue: "1", rawEndValue: "", conjunction: "AND" as const })),
+      appliedWhereInput: "status = 1 AND score = 1",
+      serverColumnFilters: { 2: { condition: "score = 1", keys: ["1"], labels: ["1"] } },
+    };
+    saveDataGridStructuredFilterState("tab-a", state);
+    saveDataGridStructuredFilterState("tab-b", state);
+    const result = await removeDataGridStructuredFilterColumnsForTab("tab-a", ["id", "status", "score"], ["status"], false, async (rules) => rules.map((rule) => `${rule.columnName} = ${rule.rawValue}`).join(" AND "));
+    expect(result).toMatchObject({ manualWhereInput: "id > 0", appliedWhereInput: "score = 1", rules: [{ columnName: "score" }], serverColumnFilters: { 1: state.serverColumnFilters[2] } });
+    expect(loadDataGridStructuredFilterState("tab-a", state.scopeKey)).toBeUndefined();
+    expect(loadDataGridStructuredFilterState("tab-a", result!.scopeKey)).toEqual(result);
+    expect(loadDataGridStructuredFilterState("tab-b", state.scopeKey)).toEqual(state);
   });
 });

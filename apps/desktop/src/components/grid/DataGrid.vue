@@ -389,7 +389,7 @@ import { useDataGridAsyncSurface } from "@/composables/useDataGridAsyncSurface";
 import { createDataGridFilterConditionCache, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { DATA_GRID_DISTINCT_VALUE_DEFAULT_LIMIT, useDataGridDistinctValueLoader } from "@/composables/useDataGridDistinctValueLoader";
 import { dataGridDistinctValueKey, dataGridNullSuggestionFilterMode, toggleAllDataGridDistinctValueOptions, type DataGridDistinctValueSource, type DataGridDistinctValueSuggestionState, type DataGridDistinctValueSuggestionTarget } from "@/lib/dataGrid/dataGridDistinctValueSuggestions";
-import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, removeDataGridStructuredFilterColumnsForTab, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { createDataGridSearchScopeKey } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
@@ -422,7 +422,7 @@ import {
   dataGridDropColumnVisibleIndexes,
   dataGridDropTabsHavePending,
   dataGridDropTargetTabs,
-  dataGridSqlTextReferencesColumn,
+  dataGridSqlTextReferencesAnyColumn,
   isDataGridColumnNameCaseSensitive,
   isDataGridViewTable,
   sameOptionalScope as sameOptionalDropScope,
@@ -1923,6 +1923,7 @@ function loadStructuredFilterStateForScope() {
   }
   appliedStructuredWhereInput.value = "";
   serverColumnFilters.value = {};
+  whereFilterInput.value = props.initialWhereInput ?? "";
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
   markConditionInputsApplied();
   structuredFilterHydrationReady.value = true;
@@ -5619,7 +5620,7 @@ async function forgetDroppedColumnQueryState(names: string[]): Promise<boolean> 
     cleared = true;
   }
   if (cleared) serverColumnFilters.value = nextServerFilters;
-  if (names.some((name) => dataGridSqlTextReferencesColumn(whereFilterInput.value, name, dropColumnCaseSensitive()))) {
+  if (dataGridSqlTextReferencesAnyColumn(whereFilterInput.value, names, dropColumnCaseSensitive())) {
     whereFilterInput.value = "";
     cleared = true;
   }
@@ -5637,7 +5638,7 @@ async function forgetDroppedColumnQueryState(names: string[]): Promise<boolean> 
     clearSort();
     syncOrderByInputWithSort(null, null);
     cleared = true;
-  } else if (names.some((name) => dataGridSqlTextReferencesColumn(orderByInput.value, name, dropColumnCaseSensitive()))) {
+  } else if (dataGridSqlTextReferencesAnyColumn(orderByInput.value, names, dropColumnCaseSensitive())) {
     orderByInput.value = "";
     cleared = true;
   }
@@ -5656,11 +5657,34 @@ async function forgetDroppedColumnQueryState(names: string[]): Promise<boolean> 
   return cleared;
 }
 
-function patchOpenDataTabsAfterColumnDrop(target: DropColumnTarget, names: string[]) {
+async function patchOpenDataTabsAfterColumnDrop(target: DropColumnTarget, names: string[]) {
+  if (names.length === 0) return;
+  // Flush the current grid's cleaned visual rules before migrating their scope.
+  persistStructuredFilterState();
   const dropped = new Set(names.map(dropColumnKey));
   const keep = (name: string) => !dropped.has(dropColumnKey(name));
   for (const tab of dataGridDropTargetTabs(queryStore.tabs, target)) {
     const meta = tab.tableMeta!;
+    // Other tabs keep their query inputs in QueryTab. Clear references before
+    // refreshing them, otherwise refreshDataTab would execute SQL against the
+    // column that was just removed.
+    if (dataGridSqlTextReferencesAnyColumn(tab.whereInput, names, dropColumnCaseSensitive())) tab.whereInput = "";
+    if (dataGridSqlTextReferencesAnyColumn(tab.orderByInput, names, dropColumnCaseSensitive())) tab.orderByInput = undefined;
+    if (dataGridSqlTextReferencesAnyColumn(tab.structuredOrderByInput, names, dropColumnCaseSensitive())) tab.structuredOrderByInput = undefined;
+    const cached = await removeDataGridStructuredFilterColumnsForTab(
+      tab.id,
+      meta.columns.map((column) => column.name),
+      names,
+      dropColumnCaseSensitive(),
+      buildStructuredWhereFromRules,
+    );
+    if (cached) tab.whereInput = combineWhereInputs(cached.manualWhereInput, cached.appliedWhereInput) ?? "";
+    if (tab.result?.local_column_filters) {
+      // The stored result still has its old columns. Keep indexes paired with
+      // that snapshot; the result lifecycle resets local filters on schema change.
+      const columns = tab.result.columns;
+      queryStore.updateDataGridLocalColumnFilters(tab.id, Object.fromEntries(Object.entries(tab.result.local_column_filters).filter(([index]) => keep(columns[Number(index)] ?? ""))));
+    }
     queryStore.setTableMeta(tab.id, {
       ...meta,
       columns: meta.columns.filter((column) => keep(column.name)),
@@ -5697,7 +5721,7 @@ async function publishColumnDrop(target: DropColumnTarget, attempted: string[], 
   }
   const stillCurrent = sameDropColumnTarget(target, currentDropColumnTarget());
   const cleared = stillCurrent && dropped.length > 0 ? await forgetDroppedColumnQueryState(dropped) : false;
-  patchOpenDataTabsAfterColumnDrop(target, dropped);
+  await patchOpenDataTabsAfterColumnDrop(target, dropped);
   const groups: typeof connectionStore.treeNodes = [];
   const visit = (nodes: typeof connectionStore.treeNodes | undefined) => {
     if (!nodes) return;
