@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dataGridDropColumnToolbarState, dataGridDropColumnVisibleIndexes, dataGridSqlTextReferencesColumn, isDataGridViewTable } from "@/lib/dataGrid/dataGridDropColumn";
+import { dataGridDroppedColumnNames, dataGridDropColumnToolbarState, dataGridDropColumnVisibleIndexes, dataGridDropTabsHavePending, dataGridDropTargetTabs, dataGridSqlTextReferencesColumn, isDataGridColumnNameCaseSensitive, isDataGridViewTable } from "@/lib/dataGrid/dataGridDropColumn";
 
 const status = { name: "status", primaryKey: false, protectedColumn: false };
 
@@ -39,5 +39,39 @@ describe("data grid drop column", () => {
     expect(dataGridSqlTextReferencesColumn("user_id = 1", "id")).toBe(false);
     expect(dataGridSqlTextReferencesColumn("status_code = 1", "status")).toBe(false);
     expect(dataGridSqlTextReferencesColumn("", "status")).toBe(false);
+  });
+
+  it("matches bare names at the start, after punctuation, and case-sensitively when asked", () => {
+    expect(dataGridSqlTextReferencesColumn("status", "status")).toBe(true);
+    expect(dataGridSqlTextReferencesColumn("t.status = 1", "status")).toBe(true);
+    expect(dataGridSqlTextReferencesColumn("$status = 1", "status")).toBe(false);
+    expect(dataGridSqlTextReferencesColumn("STATUS = 1", "status")).toBe(true);
+    expect(dataGridSqlTextReferencesColumn("STATUS = 1", "status", true)).toBe(false);
+    expect(dataGridSqlTextReferencesColumn('"Foo" = 1', "foo", true)).toBe(false);
+  });
+
+  it("keeps quoted Foo and foo apart on case-sensitive dialects and reports partial success", () => {
+    expect(isDataGridColumnNameCaseSensitive("postgres")).toBe(true);
+    expect(isDataGridColumnNameCaseSensitive("mysql")).toBe(false);
+    expect(dataGridDroppedColumnNames(["Foo", "foo"], ["foo"], true)).toEqual(["Foo"]);
+    expect(dataGridDroppedColumnNames(["Foo", "foo"], ["foo"], false)).toEqual([]);
+    expect(dataGridDroppedColumnNames(["a", "b", "c"], ["c"], false)).toEqual(["a", "b"]);
+  });
+
+  it("blocks on any open page of the table that has unsaved rows or a draft", () => {
+    const target = { connectionId: "c1", database: "db", schema: "", catalog: "", tableName: "t" };
+    const meta = { tableName: "t", database: "db" };
+    const tabs = [
+      { id: "a", mode: "data", connectionId: "c1", database: "db", tableMeta: meta },
+      { id: "b", mode: "data", connectionId: "c1", database: "db", tableMeta: meta, pendingDataChangeCount: 2 },
+      { id: "c", mode: "data", connectionId: "c1", database: "db", tableMeta: meta, hasPendingDataEditorDraft: true },
+      { id: "d", mode: "data", connectionId: "c1", database: "db", tableMeta: { tableName: "other", database: "db" }, pendingDataChangeCount: 5 },
+      { id: "e", mode: "data", connectionId: "c2", database: "db", tableMeta: meta, pendingDataChangeCount: 5 },
+    ];
+    const same = dataGridDropTargetTabs(tabs, target);
+    expect(same.map((tab) => tab.id)).toEqual(["a", "b", "c"]);
+    expect(dataGridDropTabsHavePending(same)).toBe(true);
+    expect(dataGridDropTabsHavePending([same[0]!])).toBe(false);
+    expect(dataGridDropTabsHavePending([same[2]!])).toBe(true);
   });
 });
